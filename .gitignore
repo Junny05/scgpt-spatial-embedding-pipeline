@@ -1,0 +1,11 @@
+config.yaml
+*.h5ad
+emb/
+figures/
+data/
+batch_log.csv
+__pycache__/
+*.pyc
+scGPT-spatial/
+*.log
+.DS_Store

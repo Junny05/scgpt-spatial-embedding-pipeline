@@ -7,17 +7,19 @@ embeddings.
 ## Setup
 
 0. Python 3.9, `pip install -r requirements.txt`.
-1. Clone the CPU-patched scGPT-spatial fork:
-   `git clone https://github.com/Junny05/scGPT-spatial-cpu-patch` (optional
-   `flash_attn`, `use_fast_transformer=False`, `Wqkv.` → `in_proj_` checkpoint
-   key remap, optional `scib`, `num_workers=0` — lets it run without a GPU).
+1. This repo includes a CPU-patched copy of scGPT-spatial under
+   `scGPT-spatial/` (optional `flash_attn`, `use_fast_transformer=False`,
+   `Wqkv.` → `in_proj_` checkpoint key remap, optional `scib`,
+   `num_workers=0` — lets it run without a GPU; see
+   `scGPT-spatial/README.md` for the upstream project).
 2. Download the pretrained checkpoint (`vocab.json`, `args.json`,
-   `best_model.pt`, `all_dict_mean_std.csv`) from the source linked in that
-   repo's README (not committed — it's ~220MB, over GitHub's file limit) and
-   place it under `<fork>/checkpoints/scGPT_spatial_v1/`.
+   `best_model.pt`, `all_dict_mean_std.csv`) from the source linked in
+   `scGPT-spatial/README.md` (not committed — it's ~220MB, over GitHub's
+   file limit) and place it under
+   `scGPT-spatial/checkpoints/scGPT_spatial_v1/`.
 3. ```
    cp config.example.yaml config.yaml
-   # edit config.yaml: repo (path to the fork above), checkpoint, data_dir, out_dir
+   # edit config.yaml: repo (path to scGPT-spatial/ above), checkpoint, data_dir, out_dir
    ```
 
 `config.yaml` is gitignored — never commit it or any `.h5ad` file.

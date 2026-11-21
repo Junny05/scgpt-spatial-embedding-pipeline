@@ -6,6 +6,6 @@ data/
 batch_log.csv
 __pycache__/
 *.pyc
-scGPT-spatial/
+scGPT-spatial/checkpoints/
 *.log
 .DS_Store

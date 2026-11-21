@@ -55,39 +55,37 @@ class GeneAggregator:
             np.add.at(sum_buf, ids, embs)
             np.add.at(count_buf, ids, 1)
 
-    def finalize(self, vocab: GeneVocab):
-        """Return an AnnData with one row per (region, gene) that was actually
-        observed anywhere, X = averaged 512-d embedding, NaN where that
-        particular region never saw that gene.
+    def finalize(self, vocab: GeneVocab, min_count: int = 1):
+        """Return an AnnData with one row per (region, gene) pair that was
+        actually observed at least `min_count` times in that region, X = the
+        averaged 512-d embedding. Rows below `min_count` (including genes
+        never seen in a region) are dropped rather than kept as NaN, so the
+        output only contains means that are actually comparable and the file
+        doesn't balloon with empty rows. obs["n_obs"] carries the number of
+        spots/cells each row was averaged over, so a mean from 2 spots isn't
+        silently treated the same as one from 800.
         """
         itos = vocab.get_itos()
         regions = list(self.sums.keys())
-        union_idx = (
-            sorted(set().union(*[set(np.where(self.counts[r] > 0)[0]) for r in regions]))
-            if regions
-            else []
-        )
-        gene_names = [itos[i] for i in union_idx]
 
-        X = np.full((len(regions), len(union_idx), self.embsize), np.nan, dtype=np.float32)
-        for ri, region in enumerate(regions):
+        rows_X, rows_region, rows_gene, rows_n = [], [], [], []
+        for region in regions:
             count_buf = self.counts[region]
             sum_buf = self.sums[region]
-            nz = count_buf[union_idx] > 0
-            idx_nz = np.array(union_idx)[nz]
-            X[ri, nz, :] = (sum_buf[idx_nz] / count_buf[idx_nz][:, None]).astype(np.float32)
+            keep_idx = np.where(count_buf >= min_count)[0]
+            if len(keep_idx) == 0:
+                continue
+            avg = (sum_buf[keep_idx] / count_buf[keep_idx][:, None]).astype(np.float32)
+            rows_X.append(avg)
+            rows_region.extend([region] * len(keep_idx))
+            rows_gene.extend(itos[i] for i in keep_idx)
+            rows_n.extend(count_buf[keep_idx].tolist())
 
         import anndata as ad
 
-        n_regions, n_genes, embsize = X.shape
-        flat = X.reshape(n_regions * n_genes, embsize)
-        obs = pd.DataFrame(
-            {
-                "region": np.repeat(regions, n_genes),
-                "gene": np.tile(gene_names, n_regions),
-            }
-        )
-        return ad.AnnData(X=flat, obs=obs)
+        X = np.concatenate(rows_X, axis=0) if rows_X else np.zeros((0, self.embsize), dtype=np.float32)
+        obs = pd.DataFrame({"region": rows_region, "gene": rows_gene, "n_obs": rows_n})
+        return ad.AnnData(X=X, obs=obs)
 
 
 def get_batch_embeddings_with_genes(
@@ -100,6 +98,7 @@ def get_batch_embeddings_with_genes(
     region_labels,
     max_length=1200,
     batch_size=16,
+    min_count=1,
 ):
     """
     Same forward pass as scgpt_spatial.tasks.cell_emb.get_batch_cell_embeddings
@@ -202,7 +201,7 @@ def get_batch_embeddings_with_genes(
             count += len(cls_emb)
 
     cell_embeddings = cell_embeddings / np.linalg.norm(cell_embeddings, axis=1, keepdims=True)
-    gene_adata = aggregator.finalize(vocab)
+    gene_adata = aggregator.finalize(vocab, min_count=min_count)
     return cell_embeddings, gene_adata, aggregator
 
 

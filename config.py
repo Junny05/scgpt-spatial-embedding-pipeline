@@ -23,4 +23,6 @@ def load_config(path: str = "config.yaml") -> dict:
     cfg.setdefault("leiden_resolution", 0.15)
     cfg.setdefault("n_sample_cells", 50)
     cfg.setdefault("gene_list", [])
+    cfg.setdefault("min_vocab_coverage", 0.90)
+    cfg.setdefault("min_spots_per_gene_region", 3)
     return cfg

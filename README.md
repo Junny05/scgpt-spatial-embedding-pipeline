@@ -43,12 +43,16 @@ Spatial vs. snRNA is auto-detected by the presence of `obsm["spatial"]` and
   gene-level aggregation, and UMAP coordinates in `obsm["X_umap"]`.
 - `figures/umap_{lib}.png` — UMAP colored by `leiden_coarse`, generated every
   run from the same `out` AnnData written to `{lib}_emb.h5ad`.
-- `{lib}_genes.h5ad` — one row per `(region, gene)` pair seen in the data.
-  `X` is the averaged 512-d contextualized gene embedding (post-transformer,
+- `{lib}_genes.h5ad` — one row per `(region, gene)` pair that was observed at
+  least `min_spots_per_gene_region` times (default 3) in that region. `X` is
+  the averaged 512-d contextualized gene embedding (post-transformer,
   self-attention over all genes in that spot/cell) for that gene within that
   region, aggregated via a running sum/count — a full per-spot gene matrix is
-  never held in memory. `obs["region"]`/`obs["gene"]` identify each row; `NaN`
-  rows mean that gene was never observed in that region, not a bug.
+  never held in memory. `obs["region"]`/`obs["gene"]` identify each row,
+  and `obs["n_obs"]` is how many spots/cells the row was averaged over, so a
+  mean from 3 spots isn't silently treated as comparable to one from 800.
+  Rows below the cutoff (including genes never seen in a region) are dropped
+  rather than written as NaN, to keep file size down.
 - `{lib}_genes_percell.h5ad` (snRNA libraries only) — the same per-gene
   embedding but one row per individual cell instead of per cluster, for a
   bounded sample of `n_sample_cells` cells (default 50) plus any genes in
@@ -59,26 +63,30 @@ Spatial vs. snRNA is auto-detected by the presence of `obsm["spatial"]` and
 
 ## Verification performed
 
-- `[check] model params: N | missing from checkpoint: 0` confirms full
-  checkpoint loading for both the existing cell-embedding path and the new
-  gene-embedding path (`gene_embed.load_model_and_vocab`, which reuses
-  `cell_emb.load_pretrained`).
-- Gene-level output has 0 NaNs among genes actually observed in a region;
-  shapes are `(n_regions * n_genes_seen, 512)`.
+- `tests/test_checkpoint_loading.py` loads the real checkpoint and asserts
+  `missing from checkpoint: 0` — run it with `pytest tests/` after setting
+  up `config.yaml` (it's skipped, not failed, if `config.yaml` doesn't exist
+  yet). This catches a silent weight-loading failure if the model or
+  checkpoint ever changes incompatibly.
+- Gene-level output has 0 NaNs (rows below `min_spots_per_gene_region` are
+  dropped rather than kept as NaN).
 - Gene-id → gene-name mapping was independently verified: for a region/gene
   pair, the vocab id looked up via `GeneVocab` and the running sum/count
   buffer in `GeneAggregator` reproduce exactly the row written to
-  `{lib}_genes.h5ad` (see test in plan/verification notes — not re-run on
-  every invocation).
+  `{lib}_genes.h5ad`.
 
 ## Known limitations
 
 - "Region" is a leiden cluster computed from the cell/spot embeddings within
   a single library, not a true anatomical annotation — it's a proxy grouping,
   and resolution (`leiden_resolution` in config) changes cluster granularity.
-- Genes not present in the scGPT vocabulary are silently dropped (logged by
-  `embed_data`/`id_in_vocab` filtering); gene symbol mismatches (e.g. wrong
-  `feature_name` column) will silently reduce coverage rather than error.
+- Genes not present in the scGPT vocabulary are dropped (`embed_data`'s
+  `id_in_vocab` filtering). This is no longer silent: every run prints
+  `genes_in_vocab`, `expressed_genes_in_vocab`, and
+  `share_of_counts_on_in_vocab_genes` for that library, and prints a
+  `[WARNING]` if the share falls below `min_vocab_coverage` (default 0.90) —
+  the usual cause is a wrong `gene_col`/var column (e.g. Ensembl IDs instead
+  of symbols, or a species/annotation mismatch).
 - Per-cell snRNA gene embeddings are only saved for a small sample of cells,
   not the full library, to keep output size bounded.
 - Zero-shot only; no fine-tuning or batch-effect correction across libraries.

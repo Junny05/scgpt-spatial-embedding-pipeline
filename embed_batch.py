@@ -16,6 +16,8 @@ MAX_LENGTH = CFG["max_length"]
 LEIDEN_RES = CFG["leiden_resolution"]
 N_SAMPLE_CELLS = CFG["n_sample_cells"]
 GENE_LIST = set(CFG["gene_list"])
+MIN_VOCAB_COVERAGE = CFG["min_vocab_coverage"]
+MIN_SPOTS_PER_GENE_REGION = CFG["min_spots_per_gene_region"]
 
 sys.path.insert(0, REPO)
 from scgpt_spatial.tasks import embed_data  # noqa: E402
@@ -57,14 +59,23 @@ def print_vocab_coverage(lib, adata, vocab, gene_col="feature_name"):
     total_counts = counts_per_gene.sum()
     in_vocab_counts = counts_per_gene[in_vocab.values].sum()
     expressed_in_vocab = int(((counts_per_gene > 0) & in_vocab.values).sum())
+    share = in_vocab_counts / total_counts if total_counts > 0 else float("nan")
 
     print(
         f"[{lib}] vocab coverage: genes_in_vocab={int(in_vocab.sum())}/{len(genes)} | "
         f"expressed_genes_in_vocab={expressed_in_vocab} | "
-        f"share_of_counts_on_in_vocab_genes="
-        f"{(in_vocab_counts / total_counts if total_counts > 0 else float('nan')):.4f}",
+        f"share_of_counts_on_in_vocab_genes={share:.4f}",
         flush=True,
     )
+    if share < MIN_VOCAB_COVERAGE:
+        print(
+            f"[WARNING] {lib}: only {share:.1%} of counts land on in-vocab genes "
+            f"(threshold {MIN_VOCAB_COVERAGE:.1%}) - check that {gene_col} holds the "
+            f"right gene symbols for this library (common cause: wrong var column, "
+            f"Ensembl IDs instead of symbols, or a species/annotation mismatch).",
+            flush=True,
+        )
+    return share
 
 
 def save_percell_gene_embeddings(adata, model, vocab, model_configs, gene_ids, gene_stats_dict_file, lib, outp):
@@ -157,6 +168,7 @@ for lib in sys.argv[1:]:
     _, gene_adata, _ = gene_embed.get_batch_embeddings_with_genes(
         adata_v, gene_stats_dict_file, model, vocab, model_configs, gene_ids,
         region_labels, max_length=MAX_LENGTH, batch_size=BATCH_SIZE,
+        min_count=MIN_SPOTS_PER_GENE_REGION,
     )
     secs_gene = time.time() - t
     gene_nan = int(np.isnan(gene_adata.X).sum())

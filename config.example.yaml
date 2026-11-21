@@ -12,6 +12,16 @@ batch_size: 16
 max_length: 1200
 leiden_resolution: 0.15
 
+# Warn (not fail) if a library's share of counts landing on in-vocab genes
+# falls below this - usually signals a gene_col/symbol mismatch.
+min_vocab_coverage: 0.90
+
+# A (region, gene) row in {lib}_genes.h5ad is only kept if it was averaged
+# over at least this many spots/cells - a mean from 2 spots isn't
+# comparable to one from 800. Rows below this (incl. genes never seen in a
+# region) are dropped rather than written as NaN.
+min_spots_per_gene_region: 3
+
 # snRNA-seq only: per-cell gene embeddings are saved for a bounded subset,
 # never for every cell in the library (full per-cell is ~2.4MB per cell).
 n_sample_cells: 50

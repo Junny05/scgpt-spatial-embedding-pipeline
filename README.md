@@ -6,6 +6,7 @@ embeddings.
 
 ## Setup
 
+0. Python 3.9, `pip install -r requirements.txt`.
 1. Clone the CPU-patched scGPT-spatial fork:
    `git clone https://github.com/Junny05/scGPT-spatial-cpu-patch` (optional
    `flash_attn`, `use_fast_transformer=False`, `Wqkv.` → `in_proj_` checkpoint

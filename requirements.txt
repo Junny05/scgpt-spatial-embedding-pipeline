@@ -17,3 +17,4 @@ IPython==8.18.1
 scipy==1.13.1
 numba==0.60.0
 h5py==3.14.0
+pytest==8.4.2

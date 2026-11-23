@@ -17,7 +17,7 @@ def load_config(path: str = "config.yaml") -> dict:
             raise FileNotFoundError(f"config[{key}] does not exist: {cfg[key]}")
 
     os.makedirs(cfg["out_dir"], exist_ok=True)
-    cfg.setdefault("min_genes", 200)
+    cfg.setdefault("min_genes", "auto")
     cfg.setdefault("batch_size", 16)
     cfg.setdefault("max_length", 1200)
     cfg.setdefault("leiden_resolution", 0.15)
@@ -25,4 +25,9 @@ def load_config(path: str = "config.yaml") -> dict:
     cfg.setdefault("gene_list", [])
     cfg.setdefault("min_vocab_coverage", 0.90)
     cfg.setdefault("min_spots_per_gene_region", 3)
+    cfg.setdefault("platform", None)
+    cfg.setdefault("gene_col", None)
+    cfg.setdefault("seed", 0)
+    cfg.setdefault("max_units_for_umap", 50000)
+    cfg.setdefault("device", "cuda")
     return cfg

@@ -1,8 +1,15 @@
 import sys, os, time, csv, random
 import numpy as np
 import scanpy as sc
+import torch
 
 from config import load_config
+from platform_detect import (
+    detect_platform,
+    apply_in_tissue_filter,
+    resolve_min_genes,
+    select_gene_col_and_dedupe,
+)
 
 CFG = load_config(os.environ.get("SCGPT_CONFIG", "config.yaml"))
 REPO = CFG["repo"]
@@ -10,7 +17,7 @@ CKPT = CFG["checkpoint"]
 DATA = CFG["data_dir"]
 OUT = CFG["out_dir"]
 LOG = CFG["log_file"]
-MIN_GENES = CFG["min_genes"]
+MIN_GENES_CFG = CFG["min_genes"]
 BATCH_SIZE = CFG["batch_size"]
 MAX_LENGTH = CFG["max_length"]
 LEIDEN_RES = CFG["leiden_resolution"]
@@ -18,6 +25,9 @@ N_SAMPLE_CELLS = CFG["n_sample_cells"]
 GENE_LIST = set(CFG["gene_list"])
 MIN_VOCAB_COVERAGE = CFG["min_vocab_coverage"]
 MIN_SPOTS_PER_GENE_REGION = CFG["min_spots_per_gene_region"]
+SEED = CFG["seed"]
+MAX_UNITS_FOR_UMAP = CFG["max_units_for_umap"]
+DEVICE_CFG = CFG["device"]
 
 sys.path.insert(0, REPO)
 from scgpt_spatial.tasks import embed_data  # noqa: E402
@@ -30,26 +40,13 @@ OBS_COLS_TO_CARRY = [
 ]
 
 
-def prep_gene_col_snrna(adata):
-    """snRNA: use var['gene_name'] as the gene symbol column. Drop genes with
-    no name, and for duplicate symbols keep the one with the highest total
-    counts (computed on the cells currently in adata)."""
-    gene_name = adata.var["gene_name"]
-    valid = gene_name.notna() & (gene_name.astype(str).str.len() > 0)
-    adata = adata[:, valid.values].copy()
+def resolve_device(device_cfg):
+    if device_cfg == "cuda":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return device_cfg
 
-    counts_per_gene = np.asarray(adata.X.sum(axis=0)).flatten()
-    adata.var["_total_counts_now"] = counts_per_gene
-    adata.var["feature_name"] = adata.var["gene_name"].values
 
-    order = adata.var.sort_values("_total_counts_now", ascending=False).index
-    dup = adata.var.loc[order, "feature_name"].duplicated(keep="first")
-    keep = order[~dup]
-    # restore original var order among kept genes
-    keep_sorted = [v for v in adata.var_names if v in set(keep)]
-    adata = adata[:, keep_sorted].copy()
-    adata.var.drop(columns=["_total_counts_now"], inplace=True)
-    return adata
+DEVICE = resolve_device(DEVICE_CFG)
 
 
 def print_vocab_coverage(lib, adata, vocab, gene_col="feature_name"):
@@ -71,8 +68,8 @@ def print_vocab_coverage(lib, adata, vocab, gene_col="feature_name"):
         print(
             f"[WARNING] {lib}: only {share:.1%} of counts land on in-vocab genes "
             f"(threshold {MIN_VOCAB_COVERAGE:.1%}) - check that {gene_col} holds the "
-            f"right gene symbols for this library (common cause: wrong var column, "
-            f"Ensembl IDs instead of symbols, or a species/annotation mismatch).",
+            f"right gene symbols for this library (common cause: wrong gene_col config "
+            f"key, Ensembl IDs instead of symbols, or a species/annotation mismatch).",
             flush=True,
         )
     return share
@@ -80,10 +77,12 @@ def print_vocab_coverage(lib, adata, vocab, gene_col="feature_name"):
 
 def save_percell_gene_embeddings(adata, model, vocab, model_configs, gene_ids, gene_stats_dict_file, lib, outp):
     """For snRNA libraries: full per-cell per-gene embeddings, but only for a
-    small bounded sample of cells (never the whole library)."""
+    small bounded sample of cells (never the whole library). If gene_list is
+    set, the output is restricted to just those genes (not "in addition to"
+    the sampled cells - see README)."""
     n = adata.n_obs
     n_sample = min(N_SAMPLE_CELLS, n)
-    rng = random.Random(0)
+    rng = random.Random(SEED)
     idx = sorted(rng.sample(range(n), n_sample))
     sub = adata[idx].copy()
     region_labels = sub.obs_names.tolist()  # one "region" per sampled cell == per-cell output
@@ -98,41 +97,41 @@ def save_percell_gene_embeddings(adata, model, vocab, model_configs, gene_ids, g
     return gene_adata
 
 
-for lib in sys.argv[1:]:
+def run_library(lib):
     outp = f"{OUT}/{lib}_emb.h5ad"
     genes_outp = f"{OUT}/{lib}_genes.h5ad"
     percell_outp = f"{OUT}/{lib}_genes_percell.h5ad"
 
     adata = sc.read_h5ad(f"{DATA}/{lib}.h5ad")
-    is_spatial = "spatial" in adata.obsm and "in_tissue" in adata.obs
+    is_spatial, platform = detect_platform(adata, CFG)
+    print(f"[{lib}] platform={platform} spatial={is_spatial}", flush=True)
 
     done = os.path.exists(outp) and os.path.exists(genes_outp)
     if is_spatial:
         if done:
-            print(f"[skip] {lib} already done"); continue
+            print(f"[skip] {lib} already done"); return
     else:
         if done and os.path.exists(percell_outp):
-            print(f"[skip] {lib} already done"); continue
+            print(f"[skip] {lib} already done"); return
 
-    if "in_tissue" in adata.obs:
-        adata = adata[adata.obs["in_tissue"] == 1].copy()
+    adata = apply_in_tissue_filter(adata, lib)
     n_before = adata.n_obs
     sc.pp.calculate_qc_metrics(adata, inplace=True)
-    adata = adata[adata.obs["n_genes_by_counts"] >= MIN_GENES].copy()
-    print(f"[{lib}] units kept {adata.n_obs}/{n_before} (>= {MIN_GENES} genes)", flush=True)
 
-    if is_spatial:
-        adata.var["feature_name"] = adata.var_names
-    else:
-        adata = prep_gene_col_snrna(adata)
+    min_genes = resolve_min_genes(MIN_GENES_CFG, platform, adata.n_vars)
+    adata = adata[adata.obs["n_genes_by_counts"] >= min_genes].copy()
+    print(f"[{lib}] units kept {adata.n_obs}/{n_before} (>= {min_genes} genes, "
+          f"min_genes={MIN_GENES_CFG})", flush=True)
 
     vocab_for_check = gene_embed.load_vocab(CKPT)
+    adata, gene_col_used = select_gene_col_and_dedupe(adata, vocab_for_check, CFG, lib)
     print_vocab_coverage(lib, adata, vocab_for_check)
 
     obs_to_save = "library_id" if "library_id" in adata.obs else None
     t = time.time()
     out = embed_data(adata, CKPT, gene_col="feature_name", obs_to_save=obs_to_save,
-                     batch_size=BATCH_SIZE, use_fast_transformer=False, return_new_adata=True)
+                     batch_size=BATCH_SIZE, use_fast_transformer=False, return_new_adata=True,
+                     device=DEVICE)
     secs_cell = time.time() - t
     assert out.n_obs == adata.n_obs, "unit count mismatch"
     if not (out.obs_names == adata.obs_names).all():
@@ -148,10 +147,23 @@ for lib in sys.argv[1:]:
 
     sc.pp.neighbors(out, use_rep="X")
     sc.tl.leiden(out, resolution=LEIDEN_RES, key_added="leiden_coarse",
-                 flavor="igraph", n_iterations=2, directed=False)
-    sc.tl.umap(out)
+                 flavor="igraph", n_iterations=2, directed=False, random_state=SEED)
+
+    if out.n_obs > MAX_UNITS_FOR_UMAP:
+        print(f"[{lib}] {out.n_obs} units > max_units_for_umap ({MAX_UNITS_FOR_UMAP}); "
+              f"UMAP/plots computed on a subsample, clustering kept for all units", flush=True)
+        umap_rng = np.random.RandomState(SEED)
+        sub_idx = umap_rng.choice(out.n_obs, size=MAX_UNITS_FOR_UMAP, replace=False)
+        umap_src = out[sub_idx].copy()
+        sc.tl.umap(umap_src, random_state=SEED)
+        out.obsm["X_umap_subsample_idx"] = sub_idx
+        plot_target = umap_src
+    else:
+        sc.tl.umap(out, random_state=SEED)
+        plot_target = out
+
     out.write_h5ad(outp)
-    sc.pl.umap(out, color="leiden_coarse", title=f"{lib} - scGPT-spatial zero-shot embedding",
+    sc.pl.umap(plot_target, color="leiden_coarse", title=f"{lib} - scGPT-spatial zero-shot embedding",
                show=False, save=f"_{lib}.png")
     if is_spatial:
         sc.pl.embedding(out, basis="spatial", color=["leiden_coarse", "n_genes"],
@@ -159,7 +171,7 @@ for lib in sys.argv[1:]:
 
     # gene-level embeddings, aggregated per leiden cluster (region / cell-type proxy)
     t = time.time()
-    model, vocab, model_configs, gene_stats_dict_file = gene_embed.load_model_and_vocab(CKPT)
+    model, vocab, model_configs, gene_stats_dict_file = gene_embed.load_model_and_vocab(CKPT, device=DEVICE)
     adata.var["id_in_vocab"] = [vocab[g] if g in vocab else -1 for g in adata.var["feature_name"]]
     adata_v = adata[:, adata.var["id_in_vocab"] >= 0].copy()
     gene_ids = np.array(vocab(adata_v.var["feature_name"].tolist()), dtype=int)
@@ -183,7 +195,19 @@ for lib in sys.argv[1:]:
     with open(LOG, "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["library", "units_before", "units_kept", "cell_seconds", "gene_seconds", "nans", "gene_nans"])
-        w.writerow([lib, n_before, out.n_obs, round(secs_cell), round(secs_gene), nan, gene_nan])
+            w.writerow(["library", "platform", "units_before", "units_kept", "cell_seconds", "gene_seconds", "nans", "gene_nans"])
+        w.writerow([lib, platform, n_before, out.n_obs, round(secs_cell), round(secs_gene), nan, gene_nan])
     print(f"[done] {lib}: {out.shape} cells {secs_cell/60:.1f}min, genes {gene_adata.shape} {secs_gene/60:.1f}min, "
           f"NaNs {nan}/{gene_nan}", flush=True)
+
+
+def main():
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    for lib in sys.argv[1:]:
+        run_library(lib)
+
+
+if __name__ == "__main__":
+    main()

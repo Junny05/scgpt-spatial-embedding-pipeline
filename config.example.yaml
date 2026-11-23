@@ -1,19 +1,33 @@
 # Copy this file to config.yaml and fill in real paths.
 # config.yaml is gitignored - never commit real data paths or checkpoints.
 
-repo: /Users/junzeke/scgpt_test/scGPT-spatial
-checkpoint: /Users/junzeke/scgpt_test/scGPT-spatial/checkpoints/scGPT_spatial_v1
-data_dir: /Users/junzeke/scgpt_test/data
-out_dir: /Users/junzeke/scgpt_test/emb
-log_file: /Users/junzeke/scgpt_test/batch_log.csv
+repo: /path/to/scGPT-spatial
+checkpoint: /path/to/scGPT-spatial/checkpoints/scGPT_spatial_v1
+data_dir: /path/to/data
+out_dir: /path/to/emb
+log_file: /path/to/batch_log.csv
 
-min_genes: 200
+# "auto" -> 200 for whole-transcriptome platforms (Visium, Visium HD, snRNA),
+# max(5, 5% of panel size) for targeted panels (Xenium, MERFISH). Or set an
+# explicit integer to override for all platforms.
+min_genes: auto
 batch_size: 16
 max_length: 1200
 leiden_resolution: 0.15
 
+# Platform is auto-detected from obsm["spatial"] / obs["in_tissue"] / panel
+# size (one of visium, visium_hd, xenium, merfish, snrna). Only needed if
+# auto-detection picks the wrong platform (affects min_genes="auto" and logging).
+# platform: visium
+
+# Gene-symbol column in adata.var is auto-selected (highest vocab overlap
+# among gene_name, gene_symbols, feature_name, var_names). Set this only to
+# override that choice.
+# gene_col: gene_name
+
 # Warn (not fail) if a library's share of counts landing on in-vocab genes
-# falls below this - usually signals a gene_col/symbol mismatch.
+# falls below this - usually signals a gene_col/symbol mismatch. Also used
+# as the hard failure threshold for gene_col auto-selection.
 min_vocab_coverage: 0.90
 
 # A (region, gene) row in {lib}_genes.h5ad is only kept if it was averaged
@@ -25,4 +39,20 @@ min_spots_per_gene_region: 3
 # snRNA-seq only: per-cell gene embeddings are saved for a bounded subset,
 # never for every cell in the library (full per-cell is ~2.4MB per cell).
 n_sample_cells: 50
-gene_list: []  # optional list of gene symbols to always include per-cell
+# Optional list of gene symbols to restrict the per-cell output to (if set,
+# ONLY these genes are kept - it does not add genes on top of n_sample_cells).
+gene_list: []
+
+# Seed for cell/UMAP subsampling and leiden/UMAP random state. The model's
+# own token-sampling (for libraries with sequences longer than max_length)
+# uses PyTorch's global RNG, which this seed also sets via torch.manual_seed.
+seed: 0
+
+# Above this many spot/cell units, neighbors+leiden still run on all units,
+# but UMAP coordinates and plots are computed on a fixed-seed subsample of
+# this size (UMAP doesn't scale well past ~10^5 points). Relevant for
+# Visium HD / large Xenium or MERFISH libraries.
+max_units_for_umap: 50000
+
+# "cuda" (falls back to cpu if unavailable) or an explicit "cpu"/"cuda:0" etc.
+device: cuda

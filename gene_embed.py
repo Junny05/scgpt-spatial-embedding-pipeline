@@ -6,6 +6,7 @@ sum/count per region, instead of ever materializing a (genes x 512) matrix
 per spot/cell for a whole library.
 """
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -36,7 +37,7 @@ class GeneAggregator:
 
     def _buffers(self, region: str):
         if region not in self.sums:
-            self.sums[region] = np.zeros((self.vocab_size, self.embsize), dtype=np.float64)
+            self.sums[region] = np.zeros((self.vocab_size, self.embsize), dtype=np.float32)
             self.counts[region] = np.zeros(self.vocab_size, dtype=np.int64)
         return self.sums[region], self.counts[region]
 
@@ -51,7 +52,7 @@ class GeneAggregator:
             sum_buf, count_buf = self._buffers(str(region))
             valid = mask[i]
             ids = gene_ids[i, valid]
-            embs = gene_embs[i, valid].astype(np.float64)
+            embs = gene_embs[i, valid].astype(np.float32)
             np.add.at(sum_buf, ids, embs)
             np.add.at(count_buf, ids, 1)
 
@@ -109,33 +110,55 @@ def get_batch_embeddings_with_genes(
     count_matrix / gene_ids).
     """
     count_matrix = adata.X
-    count_matrix = count_matrix if isinstance(count_matrix, np.ndarray) else count_matrix.A
+    # Keep sparse matrices sparse: Visium HD / Xenium / MERFISH libraries can
+    # have 10^5-10^6 units, and densifying the whole matrix (.A) here blows
+    # up memory for no benefit - rows are read on demand in __getitem__.
+    if not isinstance(count_matrix, np.ndarray):
+        count_matrix = count_matrix.tocsr()
     region_labels = np.asarray(region_labels)
     assert len(region_labels) == count_matrix.shape[0]
 
     class Dataset(torch.utils.data.Dataset):
         def __init__(self, count_matrix, gene_ids, gene_stats_dict_file):
-            self.slide_mean = np.mean(
-                count_matrix[count_matrix.nonzero()[0], count_matrix.nonzero()[1]]
-            )
-            self.count_matrix = count_matrix / self.slide_mean
+            self.is_sparse = not isinstance(count_matrix, np.ndarray)
+            if self.is_sparse:
+                self.slide_mean = float(count_matrix.data.mean())
+            else:
+                nz = count_matrix.nonzero()
+                self.slide_mean = float(count_matrix[nz[0], nz[1]].mean())
+            self.count_matrix = count_matrix
             self.gene_ids = gene_ids
             self.gene_stats_dict = pd.read_csv(gene_stats_dict_file, index_col=0)
+
+            if self.is_sparse:
+                col_sums = np.asarray(count_matrix.sum(axis=0)).flatten()
+                col_counts = np.diff(count_matrix.tocsc().indptr)
             new_genes = set(self.gene_ids).difference(set(self.gene_stats_dict.index.values))
             for i in new_genes:
                 idx = np.where(self.gene_ids == i)[0]
-                col = self.count_matrix[:, idx].flatten()
-                nonzero_idx = np.nonzero(col)[0]
-                values = col[nonzero_idx]
-                self.gene_stats_dict.loc[i] = [float(values.mean())]
+                if self.is_sparse:
+                    total = col_sums[idx].sum()
+                    n = col_counts[idx].sum()
+                    mean_val = float(total / n) if n > 0 else 0.0
+                else:
+                    col = count_matrix[:, idx].flatten()
+                    nonzero_idx = np.nonzero(col)[0]
+                    values = col[nonzero_idx]
+                    mean_val = float(values.mean()) if len(values) else 0.0
+                self.gene_stats_dict.loc[i] = [mean_val / self.slide_mean]
 
         def __len__(self):
-            return len(self.count_matrix)
+            return self.count_matrix.shape[0]
 
         def __getitem__(self, idx):
-            row = self.count_matrix[idx]
-            nonzero_idx = np.nonzero(row)[0]
-            values = row[nonzero_idx]
+            if self.is_sparse:
+                row = self.count_matrix[idx]
+                nonzero_idx = row.indices
+                values = row.data / self.slide_mean
+            else:
+                row = self.count_matrix[idx] / self.slide_mean
+                nonzero_idx = np.nonzero(row)[0]
+                values = row[nonzero_idx]
             genes = self.gene_ids[nonzero_idx]
             mean_divide_by = self.gene_stats_dict.loc[genes, "mean"].values
             values = np.divide(values, mean_divide_by)
@@ -174,9 +197,20 @@ def get_batch_embeddings_with_genes(
     cell_embeddings = np.zeros((len(dataset), embsize), dtype=np.float32)
     aggregator = GeneAggregator(vocab_size=len(vocab), embsize=embsize)
 
+    n_batches = len(data_loader)
+    progress_every = max(1, n_batches // 5)  # ~every 20%, in case tqdm is swallowed in logs
+    start_time = time.time()
+
     with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
         count = 0
-        for data_dict in tqdm(data_loader, desc="Embedding cells + genes"):
+        for batch_i, data_dict in enumerate(tqdm(data_loader, desc="Embedding cells + genes")):
+            if batch_i % progress_every == 0:
+                elapsed = time.time() - start_time
+                print(
+                    f"[gene_embed] batch {batch_i}/{n_batches} "
+                    f"({count}/{len(dataset)} units) elapsed={elapsed:.0f}s",
+                    flush=True,
+                )
             input_gene_ids = data_dict["gene"].to(device)
             src_key_padding_mask = input_gene_ids.eq(vocab[model_configs["pad_token"]])
 

@@ -156,7 +156,7 @@ def run_library(lib):
         sub_idx = umap_rng.choice(out.n_obs, size=MAX_UNITS_FOR_UMAP, replace=False)
         umap_src = out[sub_idx].copy()
         sc.tl.umap(umap_src, random_state=SEED)
-        out.obsm["X_umap_subsample_idx"] = sub_idx
+        out.uns["umap_subsample_idx"] = sub_idx
         plot_target = umap_src
     else:
         sc.tl.umap(out, random_state=SEED)

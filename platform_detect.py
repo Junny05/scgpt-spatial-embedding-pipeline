@@ -94,20 +94,19 @@ def _dedupe_by_symbol(adata, symbols):
     symbol for each var row (may contain NaN/empty for genes to drop)."""
     import pandas as pd
 
-    symbols = symbols.astype(str)
-    valid = symbols.notna() & (symbols != "") & (symbols != "nan")
-    adata = adata[:, valid.values].copy()
-    symbols = symbols[valid.values]
+    symbols = symbols.astype(str).reset_index(drop=True)
+    valid = (symbols.notna() & (symbols != "") & (symbols != "nan")).values
+    adata = adata[:, valid].copy()
+    symbols = symbols[valid].reset_index(drop=True)
 
     counts_per_gene = np.asarray(adata.X.sum(axis=0)).flatten()
-    order = pd.Series(counts_per_gene, index=adata.var_names).sort_values(ascending=False).index
-    symbol_by_var = symbols.reindex(order)
-    dup = symbol_by_var.duplicated(keep="first")
-    keep = set(order[~dup.values])
+    order = pd.Series(counts_per_gene).sort_values(ascending=False).index  # positions, high to low
+    symbol_by_pos = symbols.reindex(order)
+    dup = symbol_by_pos.duplicated(keep="first")
+    keep_positions = sorted(order[~dup.values])
 
-    keep_sorted = [v for v in adata.var_names if v in keep]
-    adata = adata[:, keep_sorted].copy()
-    adata.var["feature_name"] = symbols.reindex(adata.var_names).values
+    adata = adata[:, keep_positions].copy()
+    adata.var["feature_name"] = symbols.iloc[keep_positions].values
     return adata
 
 
